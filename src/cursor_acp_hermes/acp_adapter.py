@@ -123,30 +123,25 @@ class AcpAdapter:
     def _handle_session_create(self, params: Dict, msg_id: Optional[int]) -> Dict:
         """Create a new session with intelligent model selection."""
         session_id = str(uuid.uuid4())
-        metadata = params.get("metadata", {})
 
         # Extract the task/prompt for model routing
         prompt_text = ""
-        if "prompt" in params:
-            prompt_text = params["prompt"]
-        elif metadata.get("task"):
-            prompt_text = metadata["task"]
-        elif metadata.get("goal"):
-            prompt_text = metadata["goal"]
+        if "task" in params:
+            prompt_text = params["task"]
+        elif "goal" in params:
+            prompt_text = params["goal"]
+        elif "metadata" in params:
+            meta = params["metadata"]
+            prompt_text = meta.get("task", meta.get("goal", meta.get("prompt", "")))
 
         # Model selection
-        preferred_model = metadata.get("model")
-        max_tier = metadata.get("maxCostTier", 5)
-
-        # Override via environment
-        env_model = os.environ.get("CURSOR_ACP_MODEL")
-        if env_model:
-            preferred_model = env_model
+        preferred_model = params.get("model") or os.environ.get("CURSOR_ACP_MODEL")
+        max_tier = int(os.environ.get("CURSOR_ACP_MAX_TIER", "5"))
 
         model_id = select_model(
             prompt=prompt_text,
             preferred_model=preferred_model,
-            max_cost_tier=int(max_tier),
+            max_cost_tier=max_tier,
         )
 
         model_spec = get_model_spec(model_id)
@@ -157,7 +152,7 @@ class AcpAdapter:
             model_id=model_id,
             created_at=time.time(),
             metadata={
-                **metadata,
+                **params.get("metadata", {}),
                 "selectedModel": model_id,
                 "modelName": model_spec.name if model_spec else model_id,
             },
@@ -177,46 +172,31 @@ class AcpAdapter:
 
     def _handle_session_prompt(self, params: Dict, msg_id: Optional[int]) -> Dict:
         """Execute a task prompt using the selected Cursor model."""
-        # params might not be a dict (e.g., list from ACP)
-        if not isinstance(params, dict):
-            params = {"prompt": str(params)}
         session_id = params.get("sessionId", "")
-        import logging; logging.getLogger(__name__).debug(f"session/prompt params: {json.dumps(params, default=str)[:300]}")
 
-        # Extract prompt text from various possible formats
+        # Extract prompt text from content blocks (ACP standard)
         prompt_text = ""
-        if "prompt" in params:
-            prompt_text = params["prompt"]
-        elif "content" in params:
-            # ACP sends content as list of content blocks
-            content = params["content"]
-            if isinstance(content, list):
-                for block in content:
-                    if isinstance(block, dict):
-                        if block.get("type") == "text":
-                            prompt_text += block.get("text", "")
-                        elif "text" in block:
-                            prompt_text += block["text"]
-                    elif isinstance(block, str):
-                        prompt_text += block
-            elif isinstance(content, str):
-                prompt_text = content
-        elif "text" in params:
-            prompt_text = params["text"]
+        raw_prompt = params.get("prompt", params.get("content", ""))
+        if isinstance(raw_prompt, list):
+            for block in raw_prompt:
+                if isinstance(block, dict):
+                    prompt_text += block.get("text", "")
+                elif isinstance(block, str):
+                    prompt_text += block
+        elif isinstance(raw_prompt, str):
+            prompt_text = raw_prompt
 
         if not prompt_text:
             return self._error(msg_id, -32002, "No prompt text provided")
-
-        stream = params.get("stream", False)
 
         # Get or create session
         if session_id and session_id in self.sessions:
             session = self.sessions[session_id]
         else:
-            # Auto-create session if not provided
+            # Auto-create session
             create_resp = self._handle_session_create(
-                {"metadata": {"task": prompt_text}},
-                None,  # notification, no response needed
+                {"task": prompt_text},
+                None,
             )
             if create_resp and "result" in create_resp:
                 session_id = create_resp["result"]["sessionId"]
@@ -228,67 +208,75 @@ class AcpAdapter:
 
         model_id = session.model_id
 
-        # Workspace from session metadata
-        workspace = session.metadata.get("workspace")
-
-        # Streaming mode — write progress to stderr, final result to stdout
-        if stream:
-            # Notify start
-            self._send_notification("session/progress", {
-                "sessionId": session_id,
-                "status": "running",
-                "model": model_id,
-            })
-
-        self.current_prompt = {
-            "session_id": session_id,
-            "prompt": prompt_text,
-            "start_time": time.time(),
-        }
+        # Stream progress notification
+        self._send_notification("session/update", {
+            "sessionId": session_id,
+            "update": {
+                "sessionUpdate": "status",
+                "content": {"text": f"🤖 Using {model_id}..."},
+            },
+        })
 
         # Call cursor-agent
         result = call_agent(
             prompt=prompt_text,
             model=model_id,
-            workspace=workspace,
+            timeout=120,
         )
 
-        # Update session
+        # Update conversation history
         session.conversation.append({
             "role": "user",
             "content": prompt_text,
             "timestamp": time.time(),
         })
-        session.conversation.append({
-            "role": "assistant",
-            "content": result.get("result", ""),
-            "timestamp": time.time(),
+
+        response_text = result.get("result", "")
+
+        # Stream response back via session/update notifications (ACP streaming)
+        if response_text:
+            # Send in chunks
+            chunk_size = 500
+            for i in range(0, len(response_text), chunk_size):
+                chunk = response_text[i:i + chunk_size]
+                self._send_notification("session/update", {
+                    "sessionId": session_id,
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"text": chunk},
+                    },
+                })
+
+        # Final result notification
+        self._send_notification("session/update", {
+            "sessionId": session_id,
+            "update": {
+                "sessionUpdate": "agent_message_final",
+                "content": {"text": response_text},
+            },
         })
 
-        self.current_prompt = None
-
-        if stream:
-            self._send_notification("session/progress", {
-                "sessionId": session_id,
-                "status": "completed" if result["success"] else "failed",
-            })
+        # Update session
+        session.conversation.append({
+            "role": "assistant",
+            "content": response_text,
+            "timestamp": time.time(),
+        })
 
         if not result["success"]:
             return self._error(msg_id, -32000, result.get("error", "Unknown error"))
 
         # Build response
+        metrics = result.get("metrics")
         response = {
             "sessionId": session_id,
             "content": [
                 {
                     "type": "text",
-                    "text": result["result"],
+                    "text": response_text,
                 }
             ],
         }
-
-        # Add usage metrics if available
-        metrics = result.get("metrics")
         if metrics:
             response["usage"] = {
                 "model": metrics.model,
