@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cursor-acp-hermes"
+version = "0.1.0"
+description = "Intelligent ACP adapter for Cursor Agent with model routing - bridges Cursor Pro models to Hermes Agent via ACP protocol"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.9"
+
+[project.scripts]
+cursor-acp-hermes = "cursor_acp_hermes.__main__:main"
