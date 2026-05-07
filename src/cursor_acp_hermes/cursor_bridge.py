@@ -115,6 +115,8 @@ def call_agent(
     if workspace:
         cmd.extend(["--workspace", workspace])
 
+    prompt = prompt if isinstance(prompt, str) else str(prompt) if prompt else ""
+
     logger.info(f"Running: {' '.join(cmd[:4])} ... --model {model}")
 
     start_time = time.time()

@@ -177,7 +177,11 @@ class AcpAdapter:
 
     def _handle_session_prompt(self, params: Dict, msg_id: Optional[int]) -> Dict:
         """Execute a task prompt using the selected Cursor model."""
+        # params might not be a dict (e.g., list from ACP)
+        if not isinstance(params, dict):
+            params = {"prompt": str(params)}
         session_id = params.get("sessionId", "")
+        import logging; logging.getLogger(__name__).debug(f"session/prompt params: {json.dumps(params, default=str)[:300]}")
 
         # Extract prompt text from various possible formats
         prompt_text = ""
