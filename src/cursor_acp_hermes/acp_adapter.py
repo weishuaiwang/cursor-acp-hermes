@@ -70,17 +70,17 @@ class AcpAdapter:
             return self._handle_initialize(params, msg_id)
         elif method == "shutdown":
             return self._handle_shutdown(params, msg_id)
-        elif method == "session/create":
+        elif method in ("session/create", "session/new"):
             return self._handle_session_create(params, msg_id)
-        elif method == "session/prompt":
+        elif method in ("session/prompt", "session/complete"):
             return self._handle_session_prompt(params, msg_id)
-        elif method == "session/cancel":
+        elif method in ("session/cancel", "session/cancel"):
             return self._handle_session_cancel(params, msg_id)
-        elif method == "sessions/list":
+        elif method in ("sessions/list", "session/list"):
             return self._handle_sessions_list(params, msg_id)
-        elif method == "sessions/delete":
+        elif method in ("sessions/delete", "session/delete"):
             return self._handle_sessions_delete(params, msg_id)
-        elif method == "models/list":
+        elif method in ("models/list", "model/list"):
             return self._handle_models_list(params, msg_id)
         else:
             return self._error(msg_id, -32601, f"Method not found: {method}")
@@ -178,7 +178,31 @@ class AcpAdapter:
     def _handle_session_prompt(self, params: Dict, msg_id: Optional[int]) -> Dict:
         """Execute a task prompt using the selected Cursor model."""
         session_id = params.get("sessionId", "")
-        prompt_text = params.get("prompt", "")
+
+        # Extract prompt text from various possible formats
+        prompt_text = ""
+        if "prompt" in params:
+            prompt_text = params["prompt"]
+        elif "content" in params:
+            # ACP sends content as list of content blocks
+            content = params["content"]
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict):
+                        if block.get("type") == "text":
+                            prompt_text += block.get("text", "")
+                        elif "text" in block:
+                            prompt_text += block["text"]
+                    elif isinstance(block, str):
+                        prompt_text += block
+            elif isinstance(content, str):
+                prompt_text = content
+        elif "text" in params:
+            prompt_text = params["text"]
+
+        if not prompt_text:
+            return self._error(msg_id, -32002, "No prompt text provided")
+
         stream = params.get("stream", False)
 
         # Get or create session
