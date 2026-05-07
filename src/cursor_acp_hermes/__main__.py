@@ -172,6 +172,11 @@ def main():
                         help="Enable debug logging")
     parser.add_argument("--version", action="store_true",
                         help="Show version")
+    # ACP protocol flags (passed by Hermes delegate_task by default)
+    parser.add_argument("--acp", action="store_true", default=False,
+                        help=argparse.SUPPRESS)  # Hidden flag, triggers ACP server mode
+    parser.add_argument("--stdio", action="store_true", default=False,
+                        help=argparse.SUPPRESS)  # Hidden flag, ACP uses stdio transport
 
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
 
